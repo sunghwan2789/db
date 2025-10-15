@@ -1179,6 +1179,135 @@ function createJoinTests(autoIndex: `off` | `eager`): void {
       ).toBeUndefined()
     })
 
+    test(`should handle three collection join subscription correctly and not emit spurious delete events`, () => {
+      // Test schema for three-collection join subscription
+      type Player = {
+        name: string
+        club_id: string
+        position: string
+      }
+
+      type Client = {
+        name: string
+        player: string // references Player.name
+        email: string
+      }
+
+      type Balance = {
+        name: string
+        client: string // references Client.name
+        amount: number
+      }
+
+      // Sample data
+      const samplePlayers: Array<Player> = [
+        { name: `player1`, club_id: `club1`, position: `forward` },
+        { name: `player2`, club_id: `club1`, position: `midfielder` },
+        { name: `player3`, club_id: `club1`, position: `defender` },
+      ]
+
+      const sampleClients: Array<Client> = [
+        { name: `client1`, player: `player1`, email: `client1@example.com` },
+        { name: `client2`, player: `player2`, email: `client2@example.com` },
+        { name: `client3`, player: `player3`, email: `client3@example.com` },
+      ]
+
+      const sampleBalances: Array<Balance> = [
+        { name: `balance1`, client: `client1`, amount: 1000 },
+        { name: `balance2`, client: `client2`, amount: 2000 },
+        { name: `balance3`, client: `client3`, amount: 1500 },
+      ]
+
+      const playersCollection = createCollection(
+        mockSyncCollectionOptions<Player>({
+          id: `test-players-subscription-${autoIndex}`,
+          getKey: (player) => player.name,
+          initialData: samplePlayers,
+          autoIndex,
+        })
+      )
+
+      const clientsCollection = createCollection(
+        mockSyncCollectionOptions<Client>({
+          id: `test-clients-subscription-${autoIndex}`,
+          getKey: (client) => client.name,
+          initialData: sampleClients,
+          autoIndex,
+        })
+      )
+
+      const balancesCollection = createCollection(
+        mockSyncCollectionOptions<Balance>({
+          id: `test-balances-subscription-${autoIndex}`,
+          getKey: (balance) => balance.name,
+          initialData: sampleBalances,
+          autoIndex,
+        })
+      )
+
+      // Create chained join query with three collections
+      const chainedJoinQuery = createLiveQueryCollection({
+        startSync: true,
+        query: (q) =>
+          q
+            .from({ player: playersCollection })
+            .innerJoin({ client: clientsCollection }, ({ client, player }) =>
+              eq(client.player, player.name)
+            )
+            .innerJoin({ balance: balancesCollection }, ({ balance, client }) =>
+              eq(balance.client, client.name)
+            )
+            .select(({ player, client, balance }) => ({
+              player_name: player.name,
+              client_name: client.name,
+              balance_amount: balance.amount,
+            })),
+      })
+
+      // Track all change events
+      const changeEvents: Array<any> = []
+      const subscription = chainedJoinQuery.subscribeChanges((changes) => {
+        changeEvents.push(...changes)
+      })
+
+      // Initial state should have 3 results
+      expect(chainedJoinQuery.toArray).toHaveLength(3)
+
+      // Clear any initial events
+      changeEvents.length = 0
+
+      // Add a new client that doesn't have a balance
+      const newClient: Client = {
+        name: `client4`,
+        player: `player1`,
+        email: `client4@example.com`,
+      }
+
+      clientsCollection.utils.begin()
+      clientsCollection.utils.write({ type: `insert`, value: newClient })
+      clientsCollection.utils.commit()
+
+      // Should still have 3 results since client4 has no balance
+      expect(chainedJoinQuery.toArray).toHaveLength(3)
+
+      // Should not emit any change events since the new client doesn't complete the join chain
+      expect(changeEvents).toHaveLength(0)
+
+      // Now delete the client we just added
+      clientsCollection.utils.begin()
+      clientsCollection.utils.write({ type: `delete`, value: newClient })
+      clientsCollection.utils.commit()
+
+      // Should still have 3 results
+      expect(chainedJoinQuery.toArray).toHaveLength(3)
+
+      // CRITICAL: Should NOT emit delete change events for a record that was never in the result set
+      expect(changeEvents).toHaveLength(0)
+
+      // Clean up
+      subscription.unsubscribe()
+    })
+
     test(`should self-join`, () => {
       // This test reproduces the exact scenario from the bug report
       type SelfJoinUser = {
