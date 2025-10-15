@@ -1,11 +1,15 @@
 import { D2, output } from "@tanstack/db-ivm"
 import { compileQuery } from "../compiler/index.js"
 import { buildQuery, getQueryIR } from "../builder/index.js"
-import { MissingAliasInputsError } from "../../errors.js"
+import {
+  MissingAliasInputsError,
+  SetWindowRequiresOrderByError,
+} from "../../errors.js"
 import { transactionScopedScheduler } from "../../scheduler.js"
 import { getActiveTransaction } from "../../transactions.js"
 import { CollectionSubscriber } from "./collection-subscriber.js"
 import { getCollectionBuilder } from "./collection-registry.js"
+import type { WindowOptions } from "../compiler/index.js"
 import type { SchedulerContextId } from "../../scheduler.js"
 import type { CollectionSubscription } from "../../collection/subscription.js"
 import type { RootStreamBuilder } from "@tanstack/db-ivm"
@@ -32,6 +36,13 @@ import type { AllCollectionEvents } from "../../collection/events.js"
 export type LiveQueryCollectionUtils = UtilsRecord & {
   getRunCount: () => number
   getBuilder: () => CollectionConfigBuilder<any, any>
+  /**
+   * Sets the offset and limit of an ordered query.
+   * Is a no-op if the query is not ordered.
+   *
+   * @returns `true` if no subset loading was triggered, or `Promise<void>` that resolves when the subset has been loaded
+   */
+  setWindow: (options: WindowOptions) => true | Promise<void>
 }
 
 type PendingGraphRun = {
@@ -79,7 +90,11 @@ export class CollectionConfigBuilder<
   private isInErrorState = false
 
   // Reference to the live query collection for error state transitions
-  private liveQueryCollection?: Collection<TResult, any, any>
+  public liveQueryCollection?: Collection<TResult, any, any>
+
+  private windowFn: ((options: WindowOptions) => void) | undefined
+
+  private maybeRunGraphFn: (() => void) | undefined
 
   private readonly aliasDependencies: Record<
     string,
@@ -171,8 +186,37 @@ export class CollectionConfigBuilder<
       utils: {
         getRunCount: this.getRunCount.bind(this),
         getBuilder: () => this,
+        setWindow: this.setWindow.bind(this),
       },
     }
+  }
+
+  setWindow(options: WindowOptions): true | Promise<void> {
+    if (!this.windowFn) {
+      throw new SetWindowRequiresOrderByError()
+    }
+
+    this.windowFn(options)
+    this.maybeRunGraphFn?.()
+
+    // Check if loading a subset was triggered
+    if (this.liveQueryCollection?.isLoadingSubset) {
+      // Loading was triggered, return a promise that resolves when it completes
+      return new Promise<void>((resolve) => {
+        const unsubscribe = this.liveQueryCollection!.on(
+          `loadingSubset:change`,
+          (event) => {
+            if (!event.isLoadingSubset) {
+              unsubscribe()
+              resolve()
+            }
+          }
+        )
+      })
+    }
+
+    // No loading was triggered
+    return true
   }
 
   /**
@@ -452,13 +496,15 @@ export class CollectionConfigBuilder<
       }
     )
 
-    const loadMoreDataCallbacks = this.subscribeToAllCollections(
+    const loadSubsetDataCallbacks = this.subscribeToAllCollections(
       config,
       fullSyncState
     )
 
+    this.maybeRunGraphFn = () => this.scheduleGraphRun(loadSubsetDataCallbacks)
+
     // Initial run with callback to load more data if needed
-    this.scheduleGraphRun(loadMoreDataCallbacks)
+    this.scheduleGraphRun(loadSubsetDataCallbacks)
 
     // Return the unsubscribe function
     return () => {
@@ -517,7 +563,10 @@ export class CollectionConfigBuilder<
       this.subscriptions,
       this.lazySourcesCallbacks,
       this.lazySources,
-      this.optimizableOrderByCollections
+      this.optimizableOrderByCollections,
+      (windowFn: (options: WindowOptions) => void) => {
+        this.windowFn = windowFn
+      }
     )
 
     this.pipelineCache = compilation.pipeline
@@ -764,7 +813,7 @@ export class CollectionConfigBuilder<
     // Combine all loaders into a single callback that initiates loading more data
     // from any source that needs it. Returns true once all loaders have been called,
     // but the actual async loading may still be in progress.
-    const loadMoreDataCallback = () => {
+    const loadSubsetDataCallbacks = () => {
       loaders.map((loader) => loader())
       return true
     }
@@ -776,7 +825,7 @@ export class CollectionConfigBuilder<
     // Initial status check after all subscriptions are set up
     this.updateLiveQueryStatus(config)
 
-    return loadMoreDataCallback
+    return loadSubsetDataCallbacks
   }
 }
 
