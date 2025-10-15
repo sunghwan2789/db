@@ -1305,6 +1305,12 @@ function createJoinTests(autoIndex: `off` | `eager`): void {
       expect(resultsAfterInsert.every((r) => r.client_name !== undefined)).toBe(
         true
       )
+      // Verify change events are emitted
+      expect({
+        delete: changeEvents.filter((c) => c.type === `delete`).length,
+        update: changeEvents.filter((c) => c.type === `update`).length,
+        insert: changeEvents.filter((c) => c.type === `insert`).length,
+      })
 
       // Clear any initial events
       changeEvents.length = 0
