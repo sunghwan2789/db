@@ -1270,7 +1270,27 @@ function createJoinTests(autoIndex: `off` | `eager`): void {
             })),
       })
 
-      // Insert client data after eager sync completion
+      // Track all change events
+      const changeEvents: Array<any> = []
+      const subscription = chainedJoinQuery.subscribeChanges((changes) => {
+        changeEvents.push(...changes)
+      })
+
+      // Initial state should have 3 results (left join includes all players even without clients)
+      expect(chainedJoinQuery.toArray).toHaveLength(3)
+      // Verify players are present but clients are null
+      const initialResults = chainedJoinQuery.toArray
+      expect(initialResults.every((r) => r.client_name === undefined)).toBe(
+        true
+      )
+      expect(initialResults.every((r) => r.balance_amount === undefined)).toBe(
+        true
+      )
+
+      // Clear any initial events from subscription setup
+      changeEvents.length = 0
+
+      // Insert client data after eager sync completion and first assertion
       clientsCollection.utils.begin()
       sampleClients.forEach((client) => {
         clientsCollection.utils.write({ type: `insert`, value: client })
@@ -1278,14 +1298,13 @@ function createJoinTests(autoIndex: `off` | `eager`): void {
       clientsCollection.utils.commit()
       clientsCollection.utils.markReady()
 
-      // Track all change events
-      const changeEvents: Array<any> = []
-      const subscription = chainedJoinQuery.subscribeChanges((changes) => {
-        changeEvents.push(...changes)
-      })
-
-      // Initial state should have 3 results
+      // Should still have 3 results, but now with client data
       expect(chainedJoinQuery.toArray).toHaveLength(3)
+      // Verify clients are now populated
+      const resultsAfterInsert = chainedJoinQuery.toArray
+      expect(resultsAfterInsert.every((r) => r.client_name !== undefined)).toBe(
+        true
+      )
 
       // Clear any initial events
       changeEvents.length = 0
