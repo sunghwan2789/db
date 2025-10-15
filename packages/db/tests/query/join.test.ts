@@ -11,7 +11,10 @@ import {
   or,
 } from "../../src/query/index.js"
 import { createCollection } from "../../src/collection/index.js"
-import { mockSyncCollectionOptions } from "../utils.js"
+import {
+  mockSyncCollectionOptions,
+  mockSyncCollectionOptionsNoInitialState,
+} from "../utils.js"
 
 // Sample data types for join testing
 type User = {
@@ -1228,10 +1231,9 @@ function createJoinTests(autoIndex: `off` | `eager`): void {
       )
 
       const clientsCollection = createCollection(
-        mockSyncCollectionOptions<Client>({
+        mockSyncCollectionOptionsNoInitialState<Client>({
           id: `test-clients-subscription-${autoIndex}`,
           getKey: (client) => client.name,
-          initialData: sampleClients,
           autoIndex,
         })
       )
@@ -1267,6 +1269,14 @@ function createJoinTests(autoIndex: `off` | `eager`): void {
               balance_amount: balance?.amount,
             })),
       })
+
+      // Insert client data after eager sync completion
+      clientsCollection.utils.begin()
+      sampleClients.forEach((client) => {
+        clientsCollection.utils.write({ type: `insert`, value: client })
+      })
+      clientsCollection.utils.commit()
+      clientsCollection.utils.markReady()
 
       // Track all change events
       const changeEvents: Array<any> = []
